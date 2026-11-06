@@ -1,8 +1,7 @@
-import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
-// https://vite.dev/config/
 export default defineConfig({
-  base: '/Beatmatch-trainer/',
   plugins: [react()],
-})
+  base: "/Beatmatch-trainer/", // must match your GitHub repo name exactly
+});
