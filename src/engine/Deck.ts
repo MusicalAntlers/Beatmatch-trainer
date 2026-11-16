@@ -63,6 +63,12 @@ export class Deck {
         this.source = null;
     }
 
+    /** Stops playback and unplugs this deck from the output so it can be thrown away. */
+    dispose(): void {
+        this.stop();
+        this.panner.disconnect();
+    }
+
     /** 1 = original speed, 1.04  = 4% faster. */
     setRate(rate: number): void {
         this.pitchRate = rate;

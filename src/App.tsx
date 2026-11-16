@@ -1,17 +1,26 @@
 // src/App.tsx
 //
-// Week 3 test page: pitch fader, nudge, keyboard shortcuts, random start offset.
+// Week 4: training rounds with difficulty levels, Lock, a hands-off drift test, and scoring.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { renderLoop } from "./engine/loops";
 import { Deck } from "./engine/Deck";
-import { phaseErrorMs, tempoErrorPct } from "./engine/phase";
+import { beatOffset, phaseErrorMs, tempoErrorPct } from "./engine/phase";
+import { generateExercise, type Exercise } from "./engine/exercises";
+import { scoreRound, type RoundResult } from "./engine/scoring";
 
-const BPM_A = 124;
-const BPM_B = 120;
 const PITCH_STEP = 0.02;
 const PITCH_RANGE = 8;
+const DRIFT_BARS = 16;    // hands-off test length; lower to 8 for quicker rounds
 
+const LEVEL_LABLES: REcord<number, string> = {
+  1: "Level 1 · 1-2% apart · meter on",
+  2: "Level 2 · 2-4% apart · meter on",
+  3: "Level 3 · 3-6% apart · meter after Lock",
+  4: "Level 4 · 4-7.5% apart · ears only",
+};
+
+type RoundPhase = "idle" | "playing" | "drift" | "results";
 interface Stats {
   bpmA: number;
   bpmB: number;
@@ -19,22 +28,72 @@ interface Stats {
   phaseMs: number;
 }
 
+/** Timing info for the current round, kept in a ref because the animation loop reads it. */
+interface RoundTiming {
+  startTime: number;
+  lockTime: number;
+  lockOffsetBeats: number;
+  lockPhaseMs: number;
+  lockTempoErr: number;
+  driftEnd: number;
+  done: boolean;
+}
+
 /** Keeps the pitch inside ±8% and snapped to 0.02% steps. */
 const clampPitch = (pct: number) =>
   Math.min(PITCH_RANGE, Math.max(-PITCH_RANGE, Math.round(pct / PITCH_STEP) * PITCH_STEP));
 
+const phaseLabel = (ms: number) =>
+  Math.abs(ms) < 20 ? "locked" : ms > 0 ? "B early" : "B late";
+
+/** A small horizontal meter: dot in the center = beats aligned. */
+function Phasemeter({ phaseMs, bpm }: { phaseMs: number; bpm: number }) {
+  const halfBeatMs = 30000 / bpm;
+  const dotPct = Math.min(100, Math.max(0, 50 + (phaseMs / halfBeatMs) * 50));
+  return (
+    <div style={{ position: "relative", height: 14, background: "#ddd", borderRadius: 7, marginTop: 8 }}>
+      <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: "#888" }} />
+      <div
+        style={{
+          position: "absolute",
+          left: `${dotPct}%`,
+          top: 1,
+          width: 12,
+          height: 12,
+          marginLeft: -6,
+          borderRadius: 6,
+          background: "#2563eb",
+        }}
+      />
+    </div>
+  );
+}
 
 export default function App() {
   const ctxRef = useRef<AudioContext | null>(null);
   const decksRef = useRef<{ a: Deck; b: Deck } | null>(null);
   const pitchRef = useRef(0); // mirror of pitchPct that the keyboard handler can read
+  const phaseRef = useRef<RoundPhase>("idle");
+  const splitRef = useRef(false);
+  const timingRef = useRef<RoundTiming | null>(null);
+  const exerciseRef = useRef<Exercise | null>(null);
 
-  const [playing, setPlaying] = useState(false);
+  const [roundPhase, setRoundPhaseState] = useState<RoundPhase>("idle");
+  const [level, setLevel] = useState(1);
+  const [exercise, setExercise] = useState<Exercise | null>(null);
   const [pitchPct, setPitchPct] = useState(0);
   const [splitCue, setSplitCue] = useState(false);
-  const [randomStart, setRandomStart] = useState(true);
-  const [showDebug, setShowDebug] = useState(true);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [driftProgress, setDriftProgress] = useState(0);
+  const [result, setResult] = useState<RoundResult | null>(null);
+  const [history, setHistory] = useState<RoundResult[]>([]);
+
+  // Keep the ref and the state in step: the ref is for event handlers and the
+  // animation loop, the state iis for redrawing the screen.
+  const setRoundPhase = useCallback((p: RoundPhase) => {
+    phaseRef.current = p;
+    setRoundPhaseState(p);
+  }, []);
 
   // useCallback keeps the same function between renders, so the keyboard
   // effect below doesn't need to re-subscribe every time.
@@ -44,6 +103,49 @@ export default function App() {
     setPitchPct(next);
     decksRef.current?.b.setRate(1 + next / 100);
   }, []);
+
+  const startRound = async () => {
+    const ctx = (ctxRef.current ??= new AudioContext());
+    await ctx.resume();
+
+    // Throw away last round's decks.
+    decksRef.current?.a.dispose();
+    decksRef.current?.b.dispose();
+
+    const ex = generateExercise(level);
+    const [bufA, bufB] = await Promise.all([
+      renderLoop({ bpm: ex.bpmA, sampleRate: ctx.sampleRate }),
+      renderLoop({ bpm: ex.bpmB, sampleRate: ctx.sampleRate }),
+    ]);
+
+    const a = new Deck(ctx, bufA, ex.bpmA, ctx.destination);
+    const b = new Deck(ctx, bufB, ex.bpmB, ctx.destination);
+    a.setPan(splitRef.current ? -1 : 0);
+    b.setPan(splitRef.current ? 1 : 0);
+    decksRef.current = { a, b };
+    changePitch(0);   // every round starts with the fader at zero
+
+    const when = ctx.currentTime + 0.1;
+    a.play(when);
+    b.play(when, (ex.phaseOffsetBeats * 60) / ex.bpmB);
+
+    exerciseRef.current = ex;
+    timingRef.current = {
+      startTime: when,
+      lockTime: 0,
+      lockOffsetBeats: 0,
+      lockPhaseMs: 0,
+      lockTempoErr: 0,
+      driftEnd: 0,
+      done: false,
+    };
+
+    setExercise(ex);
+    setResult(null);
+    setStats(null);
+    setDriftProgress(0);
+    setRoundPhase("playing");
+  };
 
   // Creates the AudioContext and both decks the first time, then reuses them.
   const setup = async () => {
