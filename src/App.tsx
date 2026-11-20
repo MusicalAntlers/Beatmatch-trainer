@@ -13,7 +13,7 @@ const PITCH_STEP = 0.02;
 const PITCH_RANGE = 8;
 const DRIFT_BARS = 16;    // hands-off test length; lower to 8 for quicker rounds
 
-const LEVEL_LABLES: REcord<number, string> = {
+const LEVEL_LABLES: Record<number, string> = {
   1: "Level 1 · 1-2% apart · meter on",
   2: "Level 2 · 2-4% apart · meter on",
   3: "Level 3 · 3-6% apart · meter after Lock",
