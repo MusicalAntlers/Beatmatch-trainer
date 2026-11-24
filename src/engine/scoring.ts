@@ -1,6 +1,6 @@
 // src/engine/scoring.ts
 //
-// Turns a round's measurements into a 0-100 score.
+// Turns a round's measurements into a 0-100 score
 
 export interface RoundMeasurements {
     level: number;
@@ -19,7 +19,7 @@ export interface RoundResult extends RoundMeasurements {
 export const LOCK_THRESHOLDS = { tempoPct: 0.1, phaseMs: 20 };
 
 /**
- * Returns 1 when value is at or below 'perfect', 0 at or above 'zero',
+ * Returns 1 when value is at of below 'perfect', 0 at or above 'zero',
  * and a straight line in between.
  */
 function scale(value: number, perfect: number, zero: number): number {
@@ -28,12 +28,12 @@ function scale(value: number, perfect: number, zero: number): number {
 }
 
 export function scoreRound(m: RoundMeasurements): RoundResult {
-    // 40 points: phase at Lock. Perfect within 5 ms, nothing past 60ms.
+    // 40 points: phase at Lock. Pefect within 5 ms, nothing past 60 ms.
     const phasePoints = 40 * scale(Math.abs(m.phaseErrorMs), 5, 60);
-    // 40 points: drift over the hands-off test. Perfect within 10 ms, nothing past 120 ms.
+    // 40 points: drift over the hands-off test. Perfect within 10 ms, nothing past 120
     const driftPoints = 40 * scale(Math.abs(m.driftMs), 10, 120);
     // 20 points: speed. Full marks within 10 s, nothing after 60 s.
-    const timePoints = 20 * scale(m.timeToLockSec, 10, 60);
+    const timePoints = 20 * scale(m.timeToLockSec, 10, 60)
 
     const locked =
         Math.abs(m.tempoErrorPct) < LOCK_THRESHOLDS.tempoPct &&
