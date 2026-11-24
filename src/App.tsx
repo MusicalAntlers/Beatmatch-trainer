@@ -13,7 +13,7 @@ const PITCH_STEP = 0.02;
 const PITCH_RANGE = 8;
 const DRIFT_BARS = 16;    // hands-off test length; lower to 8 for quicker rounds
 
-const LEVEL_LABLES: Record<number, string> = {
+const LEVEL_LABELS: Record<number, string> = {
   1: "Level 1 · 1-2% apart · meter on",
   2: "Level 2 · 2-4% apart · meter on",
   3: "Level 3 · 3-6% apart · meter after Lock",
@@ -47,7 +47,7 @@ const phaseLabel = (ms: number) =>
   Math.abs(ms) < 20 ? "locked" : ms > 0 ? "B early" : "B late";
 
 /** A small horizontal meter: dot in the center = beats aligned. */
-function Phasemeter({ phaseMs, bpm }: { phaseMs: number; bpm: number }) {
+function PhaseMeter({ phaseMs, bpm }: { phaseMs: number; bpm: number }) {
   const halfBeatMs = 30000 / bpm;
   const dotPct = Math.min(100, Math.max(0, 50 + (phaseMs / halfBeatMs) * 50));
   return (
@@ -147,59 +147,47 @@ export default function App() {
     setRoundPhase("playing");
   };
 
-  // Creates the AudioContext and both decks the first time, then reuses them.
-  const setup = async () => {
-    const ctx = (ctxRef.current ??= new AudioContext());
-    await ctx.resume();
+  const lock = () => {
+    const ctx = ctxRef.current;
+    const decks = decksRef.current;
+    const timing = timingRef.current;
+    if (!ctx || !decks || !timing || phaseRef.current !== "playing") return;
 
-    if (!decksRef.current) {
-      // Render both loops at the same time; Promise.all waits for both
-      const [bufA, bufB] = await Promise.all([
-        renderLoop({ bpm: BPM_A, sampleRate: ctx.sampleRate }),
-        renderLoop({ bpm: BPM_B, sampleRate: ctx.sampleRate }),
-      ]);
-      decksRef.current = {
-        a: new Deck(ctx, bufA, BPM_A, ctx.destination),
-        b: new Deck(ctx, bufB, BPM_B, ctx.destination),
-      };
-      decksRef.current.b.setRate(1 + pitchPct / 100);
-    }
-    return { ctx, decks: decksRef.current };
+    decks.b.nudge(0); // release any nudge in progress
+    const t = ctx.currentTime;
+
+    timing.lockTime = t;
+    timing.lockOffsetBeats = beatOffset(decks.a, decks.b, t);
+    timing.lockPhaseMs = phaseErrorMs(decks.a, decks.b, t);
+    timing.lockTempoErr = tempoErrorPct(decks.a, decks.b);
+    timing.driftEnd = t + (DRIFT_BARS * 4 * 60) / decks.a.effectiveBpm;
+
+    setRoundPhase("drift");
   };
 
-  const start = async () => {
-    const { ctx, decks } = await setup();
-    const when = ctx.currentTime + 0.1;
-
-    // Start B somewhere between 15% and 85% of a beat off, so it never starts aligned
-    const offsetBeats = randomStart ? 0.15 + Math.random() * 0.7 : 0;
-
-    decks.a.play(when);
-    decks.b.play(when, (offsetBeats * 60) / BPM_B);
-    setPlaying(true);
-  };
-
-  const stop = () => {
+  const giveUp = () => {
     decksRef.current?.a.stop();
     decksRef.current?.b.stop();
-    setPlaying(false);
+    setRoundPhase("idle");
   };
 
   const toggleSplitCue = () => {
     const next = !splitCue;
+    splitRef.current = next;
     setSplitCue(next);
-    decksRef.current?.a.setPan(next ? -1 : 0); // A in left ear
-    decksRef.current?.b.setPan(next ? 1 : 0); // B in right ear
+    decksRef.current?.a.setPan(next ? -1 : 0);
+    decksRef.current?.b.setPan(next ? 1 : 0);
   };
 
-  // Props for a hold-to-nudge button: nudge while the pointer is down, release on up or leave.
   const nudgeProps = (direction: number) => ({
-    onPointerDown: () => decksRef.current?.b.nudge(direction),
+    onPointerDown: () => {
+      if (phaseRef.current === "playing") decksRef.current?.b.nudge(direction);
+    },
     onPointerUp: () => decksRef.current?.b.nudge(0),
     onPointerLeave: () => decksRef.current?.b.nudge(0),
   });
 
-  // Keyboard shortcuts:
+  // Keyboard: 
   // ↑ / ↓        pitch up / down 0.02% (hold Shift for 0.2%)
   // . (comma)    hold to budge B back (slower)
   // . (period)   hold to budge B forward (faster) 
@@ -231,24 +219,54 @@ export default function App() {
     };
   }, [changePitch]);
 
-  // While playing, read the clocks about 30 times a second.
+  // Animation loop: live readings while playing, and the drift test after Lock.
   useEffect(() => {
-    if (!playing) return;
+    if (roundPhase !== "playing" && roundPhase !== "drift") return;
     let frame = 0;
     let last = 0;
 
     const tick = (ms: number) => {
-      if (ms - last > 33) {
+      const ctx = ctxRef.current;
+      const decks = decksRef.current;
+      const timing = timingRef.current;
+      const ex = exerciseRef.current;
+
+      if (ctx && decks && timing && ex && ms - last > 33) {
         last = ms;
-        const ctx = ctxRef.current;
-        const decks = decksRef.current;
-        if (ctx && decks) {
-          setStats({
-            bpmA: decks.a.effectiveBpm,
-            bpmB: decks.b.effectiveBpm,
-            tempoErr: tempoErrorPct(decks.a, decks.b),
-            phaseMs: phaseErrorMs(decks.a, decks.b, ctx.currentTime),
-          });
+        const t = ctx.currentTime;
+
+        setStats({
+          bpmA: decks.a.effectiveBpm,
+          bpmB: decks.b.effectiveBpm,
+          tempoErr: tempoErrorPct(decks.a, decks.b),
+          phaseMs: phaseErrorMs(decks.a, decks.b, t),
+        });
+
+        if (phaseRef.current === "drift" && !timing.done) {
+          const total = timing.driftEnd - timing.lockTime;
+          setDriftProgress(Math.min(1, (t - timing.lockTime) / total));
+
+          if (t >= timing.driftEnd) {
+            timing.done = true;
+
+            // How far the beats slid apart between Lock and the end of the test.
+            const driftBeats = beatOffset(decks.a, decks.b, timing.driftEnd) - timing.lockOffsetBeats;
+
+            const r = scoreRound({
+              level: ex.level,
+              timeToLockSec: timing.lockTime - timing.startTime,
+              phaseErrorMs: timing.lockPhaseMs,
+              tempoErrorPct: timing.lockTempoErr,
+              driftMs: (driftBeats * 60000) / decks.a.effectiveBpm,
+            });
+
+            decks.a.stop();
+            decks.b.stop();
+            setResult(r);
+            setHistory((h) => [r, ...h].slice(0, 10));  // newest first, keep 10
+            setRoundPhase("results");
+            return; // stop the loop
+          }
         }
       }
       frame = requestAnimationFrame(tick);
@@ -256,100 +274,154 @@ export default function App() {
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing]);
+  }, [roundPhase, setRoundPhase]);
 
-  const halfBeatMs = stats ? 30000 / stats.bpmA : 1;
-  const dotPct = stats ? Math.min(100, Math.max(0, 50 + (stats.phaseMs / halfBeatMs) * 50)) : 50;
+  const playing = roundPhase === "playing";
+  const inRound = roundPhase === "playing" || roundPhase === "drift";
 
-  return (
-    <div style={{ padding: 24, fontFamily: "system-ui, sans-serif", maxWidth: 480 }}>
-      <h1>Beatmatch Trainer</h1>
+  // Whether this level lets you see live readings right now.
+  const showLive = 
+  exercise !== null &&
+    ((roundPhase === "playing" && exercise.meter === "live") ||
+    (roundPhase === "drift" && exercise.meter !== "hidden"));
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {playing ? (
-          <button onClick={stop}>Stop</button>
-        ) : (
-          <button onClick={start}>Play both decks</button>
+    const average =
+      history.length > 0 ? Math.round(history.reduce((sum, r) => sum + r.score, 0) / history.length) : null;
+
+    return (
+      <div style={{ padding: 24, fontFamily: "system-ui, sans-serif", maxWidth: 520 }}>
+        <h1>Beatmatch Trainer</h1>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center"}}>
+          <select value={level} onChange={(e) => setLevel(Number(e.target.value))} disabled={inRound}>
+            {[1, 2, 3, 4].map((n) => (
+              <option key={n} value={n}>
+                {LEVEL_LABELS[n]}
+              </option>
+            ))}
+          </select>
+          <button onClick={toggleSplitCue}>Split cue: {splitCue ? "on" : "off"}</button>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          {roundPhase === "idle" && <button onClick={startRound}>Start round</button>}
+          {roundPhase === "results" && <button onClick={startRound}>Next round</button>}
+          {playing && (
+            <>
+            <button onClick={lock} style={{ fontWeight: 600}}>
+              Lock
+              </button>
+              <button onClick={giveUp}>Give up</button>
+              </>
+          )}
+        </div>
+
+        {roundPhase === "drift" && (
+          <div style={{ margin: 16 }}>
+            <div>Hands off: listening for drift over {DRIFT_BARS} bars...</div>
+            <div style={{ height: 8, background: "#ddd", borderRadius: 4, marginTop: 6 }}>
+              <div
+                style={{
+                  width: `${driftProgress * 100}%`,
+                  height: "100%",
+                  background: "#2563eb",
+                  borderRadius: 4,
+                }}
+              />
+            </div>
+          </div>
         )}
-        <button onClick={toggleSplitCue} disabled={!playing}>
-          Split cue: {splitCue ? "on" : "off"}
-        </button>
-      </div>
 
-      <label style={{ display: "block", marginTop: 12 }}>
+        <h2 style={{ fontSize: 16, marginTop: 24 }}>Deck B pitch</h2>
         <input
-          type="checkbox"
-          checked={randomStart}
-          onChange={(e) => setRandomStart(e.target.checked)}
-        />{" "}
-        Start Deck B at a random beat offset
-      </label>
-
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Deck B pitch </h2>
-      <input
-        type="range"
-        min={-PITCH_RANGE}
-        max={PITCH_RANGE}
-        step={PITCH_STEP}
-        value={pitchPct}
-        onChange={(e) => changePitch(Number(e.target.value))}
-        style={{ width: "100%" }}
-      />
-      <div style={{ display: "flex", justifyContent: "Space-between" }}>
-        <span>
+          type="range"
+          min={-PITCH_RANGE}
+          max={PITCH_RANGE}
+          step={PITCH_STEP}
+          value={pitchPct}
+          onChange={(e) => changePitch(Number(e.target.value))}
+          disabled={!playing}
+          style={{ width: "100%" }}
+        />
+        <div>
           {pitchPct >= 0 ? "+" : ""}
           {pitchPct.toFixed(2)}%
-        </span>
-        <button onClick={() => changePitch(0)}>Reset</button>
-      </div>
-
-      <h2 style={{ fontSize: 16, marginTop: 24 }}>Deck B nudge (hold)</h2>
-      <div style={{ display: "flex", gap: 8 }}>
-        <button {...nudgeProps(-1)} disabled={!playing}>
-          ◀︎ Slow down ( , )
-        </button>
-        <button {...nudgeProps(1)} disabled={!playing}>
-          Speed up ( . ) ▶︎
-        </button>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 24 }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>Debug</h2>
-        <button onClick={() => setShowDebug(!showDebug)}>
-          {showDebug ? "Hide (ears only)" : "Show"}
-        </button>
-      </div>
-
-      {!showDebug ? (
-        <p>Hidden, Trust your ears, then peek to check.</p>
-      ) : stats ? (
-        <div style={{ fontFamily: "ui-monospace, monospace", lineHeight: 1.7, marginTop: 8 }}>
-          <div>Deck A: {stats.bpmA.toFixed(2)} BPM</div>
-          <div>Deck B: {stats.bpmB.toFixed(2)} BPM</div>
-          <div>Tempo error: {stats.tempoErr.toFixed(2)}%</div>
-          <div>
-            Phase: {stats.phaseMs.toFixed(0)} ms{" "}
-            {Math.abs(stats.phaseMs) < 20 ? "(locked)" : stats.phaseMs > 0 ? "(B early)" : "(B late)"}
-          </div>
-          <div style={{ position: "relative", height: 14, background: "#ddd", borderRadius: 7, marginTop: 8 }}>
-            <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 2, background: "#888" }} />
-            <div
-              style={{
-                position: "absolute",
-                left: `${dotPct}%`,
-                top: 1,
-                width: 12,
-                height: 12,
-                marginLeft: -6,
-                borderRadius: 6,
-                background: "#2563eb",
-              }}
-            />
-          </div>
         </div>
-      ) : (
-        <p>Press play to see live readings.</p>
-      )}
-    </div>
-  );
-}
+
+        <h2 style={{ fontSize: 16, marginTop: 24 }}>Deck B nudge (hold)</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button {...nudgeProps(-1)} disabled={!playing}>
+            ◀︎ Slow down ( , )
+          </button>
+          <button {...nudgeProps(1)} disabled={!playing}>
+            Speed up ( . ) ▶︎
+          </button>
+        </div>
+
+        {inRound && (
+          <div style={{ marginTop: 24, fontFamily: "ui-monospace, monospace", lineHeight: 1.7 }}>
+            {showLive && stats ? (
+              <>
+                <div>Deck A: {stats.bpmA.toFixed(2)} BPM</div>
+                <div>Deck B: {stats.bpmB.toFixed(2)} BPM</div>
+                <div>
+                    Phase: {stats.phaseMs.toFixed(0)} ms ({phaseLabel(stats.phaseMs)})
+                  </div>
+                  <PhaseMeter phaseMs={stats.phaseMs} bpm={stats.bpmA} />
+                  </>
+            ) : (
+              <div style={{ fontFamily: "system-ui, sans-serif" }}>
+                Ears only. Press Lock when it sounds locked.
+              </div>
+            )}
+          </div>
+        )}
+
+        {roundPhase === "results" && result && (
+          <div style={{ marginTop: 24, padding: 16, border: "1px solid #ccc", borderRadius: 8 }}>
+            <div style={{ fontSize: 28, fontWeight: 700 }}>{result.score} / 100</div>
+            <div style={{ marginBottom: 8 }}>{result.locked ? "Locked!" : "Not quite locked"}</div>
+            <div>Time to lock: {result.timeToLockSec.toFixed(1)} s</div>
+            <div>
+              Phase at Lock: {Math.abs(result.phaseErrorMs).toFixed(0)} ms ({phaseLabel(result.phaseErrorMs)})
+            </div>
+            <div>Tempo error at Lock: {result.tempoErrorPct.toFixed(3)}%</div>
+            <div>
+              Drift over {DRIFT_BARS} bars: {Math.abs(result.driftMs).toFixed(0)} ms
+              {Math.abs(result.driftMs) >= 10 &&
+                (result.driftMs > 0 ? " (B pulled ahead: slightly too fast)" : " (B fell behind: slightly too slow)")}
+            </div>
+          </div>
+        )}
+
+        {history.length > 0 && (
+          <>
+            <h2 style={{ fontSize: 16, marginTop: 24 }}>
+              This session ({history.length} rounds, average {average})
+            </h2>
+            <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 14 }}>
+              <thead>
+                <tr style={{ textAlign: "left" }}>
+                  <th>Level</th>
+                  <th>Score</th>
+                  <th>Time</th>
+                  <th>Phase</th>
+                  <th>Drift</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((r) => (
+                  <tr key={r.playedAt}>
+                    <td>{r.level}</td>
+                    <td>{r.score}</td>
+                    <td>{r.timeToLockSec.toFixed(1)} s</td>
+                    <td>{Math.abs(r.phaseErrorMs).toFixed(0)} ms</td>
+                    <td>{Math.abs(r.driftMs).toFixed(0)} ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    );
+  }
