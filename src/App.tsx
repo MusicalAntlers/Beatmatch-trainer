@@ -8,10 +8,13 @@ import { Deck } from "./engine/Deck";
 import { beatOffset, phaseErrorMs, tempoErrorPct } from "./engine/phase";
 import { generateExercise, type Exercise } from "./engine/exercises";
 import { scoreRound, type RoundResult } from "./engine/scoring";
+import { HistoryStore } from "./engine/HistoryStore";
+import { Progress } from "./ui/Progress";
 
 const PITCH_STEP = 0.02;
 const PITCH_RANGE = 8;
 const DRIFT_BARS = 16;    // hands-off test length; lower to 8 for quicker rounds
+const historyStore = new HistoryStore();
 
 const LEVEL_LABELS: Record<number, string> = {
   1: "Level 1 · 1-2% apart · meter on",
@@ -87,6 +90,9 @@ export default function App() {
   const [driftProgress, setDriftProgress] = useState(0);
   const [result, setResult] = useState<RoundResult | null>(null);
   const [history, setHistory] = useState<RoundResult[]>([]);
+  // Load saved results once, when the app first opens.
+  const [allResults, setAllResults] = useState<RoundResult[]>(() => historyStore.load());
+  const [hideMeter, setHideMeter] = useState(false);
 
   // Keep the ref and the state in step: the ref is for event handlers and the
   // animation loop, the state iis for redrawing the screen.
@@ -264,6 +270,7 @@ export default function App() {
             decks.b.stop();
             setResult(r);
             setHistory((h) => [r, ...h].slice(0, 10));  // newest first, keep 10
+            setAllResults(historyStore.save(r));
             setRoundPhase("results");
             return; // stop the loop
           }
@@ -281,6 +288,7 @@ export default function App() {
 
   // Whether this level lets you see live readings right now.
   const showLive = 
+  !hideMeter &&
   exercise !== null &&
     ((roundPhase === "playing" && exercise.meter === "live") ||
     (roundPhase === "drift" && exercise.meter !== "hidden"));
@@ -301,6 +309,14 @@ export default function App() {
             ))}
           </select>
           <button onClick={toggleSplitCue}>Split cue: {splitCue ? "on" : "off"}</button>
+          <label>
+            <input
+              type="checkbox"
+              checked={hideMeter}
+              onChange={(e) => setHideMeter(e.target.checked)}
+              />{" "}
+              Ears only (hide meter)
+          </label>
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           {roundPhase === "idle" && <button onClick={startRound}>Start round</button>}
@@ -422,6 +438,14 @@ export default function App() {
             </table>
           </>
         )}
+
+        <Progress
+          results={allResults}
+          onClear={() => {
+            historyStore.clear();
+            setAllResults([]);
+          }}
+        />
       </div>
     );
   }
